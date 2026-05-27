@@ -22,7 +22,7 @@ class IconGenerator {
                     val r = w * 0.3f
 
                     val ringPaint = Paint().apply {
-                        color = 0xFF00FF88.toInt()
+                        color = 0xFFFF2222.toInt()
                         style = Paint.Style.STROKE
                         strokeWidth = w * 0.04f
                         alpha = 180
@@ -31,13 +31,13 @@ class IconGenerator {
                     canvas.drawCircle(cx, cy, r * 0.6f, ringPaint)
 
                     val playerPaint = Paint().apply {
-                        color = 0xFF00CCFF.toInt()
+                        color = 0xFFFF2222.toInt()
                         style = Paint.Style.FILL
                     }
                     canvas.drawCircle(cx, cy, r * 0.15f, playerPaint)
 
                     val linePaint = Paint().apply {
-                        color = 0xFF00FF88.toInt()
+                        color = 0xFFFF2222.toInt()
                         style = Paint.Style.STROKE
                         strokeWidth = w * 0.02f
                     }

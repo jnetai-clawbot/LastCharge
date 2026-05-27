@@ -37,6 +37,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var gameView: GameView
     private lateinit var aboutButton: Button
     private lateinit var scoreText: TextView
+    private lateinit var batteryText: TextView
+    private lateinit var timerText: TextView
+    private lateinit var enemyText: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,15 +55,48 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        scoreText = TextView(this).apply {
-            text = "Depth: 0m"
-            setTextColor(0xFF00FF88.toInt())
-            textSize = 18f
+        val hudBar = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding(32, 32, 32, 8)
+        }
+
+        batteryText = TextView(this).apply {
+            text = "Battery: 100%"
+            setTextColor(0xFFCCCCCC.toInt())
+            textSize = 16f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, 0, 0, 4)
+        }
+
+        timerText = TextView(this).apply {
+            text = "Dawn in: 120s"
+            setTextColor(0xFFFF6644.toInt())
+            textSize = 14f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, 0, 0, 4)
+        }
+
+        scoreText = TextView(this).apply {
+            text = "Score: 0"
+            setTextColor(0xFFFF2222.toInt())
+            textSize = 18f
             typeface = Typeface.MONOSPACE
         }
 
-        gameView = GameView(this, ::updateScore)
+        enemyText = TextView(this).apply {
+            text = "Defeated: 0"
+            setTextColor(0xFFFF4444.toInt())
+            textSize = 14f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, 0, 0, 0)
+        }
+
+        hudBar.addView(batteryText)
+        hudBar.addView(timerText)
+        hudBar.addView(scoreText)
+        hudBar.addView(enemyText)
+
+        gameView = GameView(this, ::updateHud)
 
         val buttonBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -82,7 +118,7 @@ class MainActivity : AppCompatActivity() {
         aboutButton = Button(this).apply {
             text = "About"
             setBackgroundColor(0xFF1A2A3A.toInt())
-            setTextColor(0xFF00FF88.toInt())
+            setTextColor(0xFFFF2222.toInt())
             textSize = 14f
             minHeight = 0
             minimumHeight = 80
@@ -95,7 +131,7 @@ class MainActivity : AppCompatActivity() {
         buttonBar.addView(spacer)
         buttonBar.addView(aboutButton)
 
-        root.addView(scoreText)
+        root.addView(hudBar)
         root.addView(gameView, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
         ))
@@ -103,9 +139,14 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
     }
 
-    private fun updateScore(depth: Int) {
+    private fun updateHud(battery: Int, timeLeft: Int, score: Int, defeated: Int) {
         runOnUiThread {
-            scoreText.text = "Depth: ${depth}m"
+            batteryText.text = "Battery: $battery%"
+            timerText.text = "Dawn in: ${timeLeft}s"
+            scoreText.text = "Score: $score"
+            enemyText.text = "Defeated: $defeated"
+            if (battery <= 20) batteryText.setTextColor(0xFFFF2222.toInt())
+            else batteryText.setTextColor(0xFFCCCCCC.toInt())
         }
     }
 
@@ -119,7 +160,7 @@ class MainActivity : AppCompatActivity() {
 
         layout.addView(TextView(this).apply {
             text = "Last Charge"
-            setTextColor(0xFF00FF88.toInt())
+            setTextColor(0xFFFF2222.toInt())
             textSize = 24f
             typeface = Typeface.DEFAULT_BOLD
             setPadding(0, 0, 0, 8)
@@ -141,8 +182,8 @@ class MainActivity : AppCompatActivity() {
 
         val checkBtn = Button(this).apply {
             text = "Check for Update"
-            setBackgroundColor(0xFF006644.toInt())
-            setTextColor(0xFF00FF88.toInt())
+            setBackgroundColor(0xFF440000.toInt())
+            setTextColor(0xFFFF2222.toInt())
             textSize = 15f
             minimumHeight = 96
             setPadding(32, 16, 32, 16)
@@ -216,167 +257,267 @@ class MainActivity : AppCompatActivity() {
     }
 }
 
-class GameView(context: Context, private val scoreCallback: (Int) -> Unit) : View(context) {
+class GameView(context: Context, private val hudCallback: (Int, Int, Int, Int) -> Unit) : View(context) {
     companion object {
-        const val TILE_SIZE = 60f
-        const val CAVE_WIDTH = 20
-        const val SONAR_RADIUS = 180f
-        const val BLAST_RADIUS = 120f
+        const val DAWN_DURATION = 120f
+        const val MOVE_DRAIN = 2
+        const val COMBAT_DRAIN = 5
+        const val FLASHLIGHT_DRAIN_PER_SEC = 1f
         const val TAG = "GameView"
     }
 
-    private val cave = Array(200) { BooleanArray(CAVE_WIDTH) }
-    private val revealed = Array(200) { BooleanArray(CAVE_WIDTH) }
-    private val enemies = mutableListOf<Enemy>()
-    private var playerX = CAVE_WIDTH / 2f
-    private var playerY = 15f
-    private var currentDepth = 0
-    private var gameOver = false
-    private var sonarPings = mutableListOf<SonarPing>()
-    private var directionalBlast: DirectionalBlast? = null
-    private var longPressActive = false
-    private var longPressX = 0f
-    private var longPressY = 0f
     private val random = Random()
+    private var playerX = 0f
+    private var playerY = 0f
+    private var battery = 100
+    private var timeElapsed = 0f
+    private var flashlightOn = false
+    private var enemiesDefeated = 0
+    private var score = 0
+    private var gameOver = false
+    private var playerMoved = false
 
-    private val wallPaint = Paint().apply { color = 0xFF1A2A3A.toInt(); style = Paint.Style.FILL }
-    private val wallRevealedPaint = Paint().apply { color = 0xFF234A6A.toInt(); style = Paint.Style.FILL }
-    private val bgPaint = Paint().apply { color = 0xFF0A0A1A.toInt(); style = Paint.Style.FILL }
-    private val sonarPaint = Paint().apply { color = 0x3300FF88.toInt(); style = Paint.Style.FILL }
+    private val collectibles = mutableListOf<Collectible>()
+    private val enemies = mutableListOf<LastChargeEnemy>()
+    private var lastMoveDrainTime = 0L
+    private var lastFlashlightDrainTime = 0L
+    private var lastChargeAttractTime = 0L
+
+    private var touchStartX = 0f
+    private var touchStartY = 0f
+    private var touchActive = false
+    private var flashTime = 0f
+    private var shakeAmount = 0f
+    private var gameOverTime = 0f
+
+    private val darkPaint = Paint().apply { color = 0xFF0A0A1A.toInt(); style = Paint.Style.FILL }
+    private val floorPaint = Paint().apply { color = 0xFF111122.toInt(); style = Paint.Style.FILL }
+    private val gridPaint = Paint().apply { color = 0xFF15152A.toInt(); style = Paint.Style.STROKE; strokeWidth = 1f }
+    private val playerPaint = Paint().apply { color = 0xFFFF2222.toInt(); style = Paint.Style.FILL }
+    private val playerGlowPaint = Paint().apply { color = 0x44FF2222.toInt(); style = Paint.Style.FILL }
+    private val playerOffPaint = Paint().apply { color = 0xFF332222.toInt(); style = Paint.Style.FILL }
+    private val outletPaint = Paint().apply { color = 0xFF44FF44.toInt(); style = Paint.Style.FILL }
+    private val outletGlowPaint = Paint().apply { color = 0x3344FF44.toInt(); style = Paint.Style.FILL }
+    private val solarPaint = Paint().apply { color = 0xFFFFAA00.toInt(); style = Paint.Style.FILL }
+    private val solarGlowPaint = Paint().apply { color = 0x33FFAA00.toInt(); style = Paint.Style.FILL }
+    private val crankPaint = Paint().apply { color = 0xFF4488FF.toInt(); style = Paint.Style.FILL }
+    private val crankGlowPaint = Paint().apply { color = 0x334488FF.toInt(); style = Paint.Style.FILL }
     private val enemyPaint = Paint().apply { color = 0xFFFF3344.toInt(); style = Paint.Style.FILL }
-    private val enemyStunnedPaint = Paint().apply { color = 0xFF886622.toInt(); style = Paint.Style.FILL }
-    private val playerPaint = Paint().apply { color = 0xFF00CCFF.toInt(); style = Paint.Style.FILL }
-    private val playerGlowPaint = Paint().apply { color = 0x3300CCFF.toInt(); style = Paint.Style.FILL }
-    private val blastPaint = Paint().apply { color = 0x6600FF88.toInt(); style = Paint.Style.FILL }
-    private val pathPaint = Paint().apply { color = 0xFFFF8800.toInt(); style = Paint.Style.STROKE; strokeWidth = 2f; pathEffect = DashPathEffect(floatArrayOf(8f, 8f), 0f) }
-    private val clearPaint = Paint().apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR) }
+    private val enemyGlowPaint = Paint().apply { color = 0x44FF3344.toInt(); style = Paint.Style.FILL }
+    private val flashlightPaint = Paint().apply { color = 0x33FF2222.toInt(); style = Paint.Style.FILL }
+    private val batteryBarBgPaint = Paint().apply { color = 0xFF1A1A2A.toInt(); style = Paint.Style.FILL }
+    private val batteryBarPaint = Paint().apply { color = 0xFFFF2222.toInt(); style = Paint.Style.FILL }
+    private val batteryLowPaint = Paint().apply { color = 0xFFFF6622.toInt(); style = Paint.Style.FILL }
+    private val gameOverOverlay = Paint().apply { color = 0xDD000000.toInt(); style = Paint.Style.FILL }
+    private val textPaint = Paint().apply {
+        color = 0xFFFF2222.toInt()
+        textSize = 40f
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+    }
+    private val smallTextPaint = Paint().apply {
+        color = 0xFFCCCCCC.toInt()
+        textSize = 24f
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.DEFAULT_BOLD
+    }
+    private val collectTextPaint = Paint().apply {
+        color = 0xFF888899.toInt()
+        textSize = 18f
+        textAlign = Paint.Align.CENTER
+        typeface = Typeface.MONOSPACE
+    }
+    private val pathPaint = Paint().apply {
+        color = 0x4400CCFF.toInt()
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+        pathEffect = DashPathEffect(floatArrayOf(4f, 4f), 0f)
+    }
 
     init {
-        generateCave()
-        startSonarReveal()
+        spawnCollectibles()
+        spawnEnemies(4)
+        playerX = width.toFloat() / 2f
+        playerY = height.toFloat() / 2f
     }
 
-    private fun generateCave() {
-        for (y in 0 until 200) {
-            for (x in 0 until CAVE_WIDTH) {
-                cave[y][x] = true
-            }
+    private fun spawnCollectibles() {
+        collectibles.clear()
+        for (i in 0 until 4) {
+            collectibles.add(Collectible(OutletType.POWER_OUTLET,
+                random.nextFloat() * 0.8f + 0.1f, random.nextFloat() * 0.7f + 0.05f))
         }
-        var cx = CAVE_WIDTH / 2f
-        var cy = 0f
-        while (cy < 190) {
-            val r = 1.5f + random.nextFloat() * 3f
-            for (y in max(0f, cy - r).toInt()..min(199f, cy + r).toInt()) {
-                for (x in max(0f, cx - r).toInt()..min((CAVE_WIDTH - 1).toFloat(), cx + r).toInt()) {
-                    cave[y][x] = false
+        for (i in 0 until 3) {
+            collectibles.add(Collectible(OutletType.SOLAR_PANEL,
+                random.nextFloat() * 0.8f + 0.1f, random.nextFloat() * 0.7f + 0.05f))
+        }
+        for (i in 0 until 3) {
+            collectibles.add(Collectible(OutletType.CRANK_GENERATOR,
+                random.nextFloat() * 0.8f + 0.1f, random.nextFloat() * 0.7f + 0.05f))
+        }
+    }
+
+    private fun spawnEnemies(count: Int) {
+        for (i in 0 until count) {
+            val angle = random.nextFloat() * 2f * PI.toFloat()
+            val dist = 0.3f + random.nextFloat() * 0.3f
+            enemyLoop@ for (attempt in 0..20) {
+                val ex = 0.5f + cos(angle) * dist * (0.5f + attempt * 0.1f)
+                val ey = 0.5f + sin(angle) * dist * (0.5f + attempt * 0.1f)
+                if (ex in 0.05f..0.95f && ey in 0.05f..0.95f) {
+                    val pdx = ex - playerX / maxOf(1f, width.toFloat())
+                    val pdy = ey - playerY / maxOf(1f, height.toFloat())
+                    if (sqrt(pdx * pdx + pdy * pdy) > 0.15f) {
+                        enemies.add(LastChargeEnemy(ex, ey))
+                        break@enemyLoop
+                    }
                 }
             }
-            cx += (random.nextFloat() - 0.5f) * 2.5f
-            cx = cx.coerceIn(1.5f, CAVE_WIDTH - 2.5f)
-            cy += 1f + random.nextFloat() * 2f
-        }
-        for (y in 0..3) {
-            for (x in (CAVE_WIDTH / 2 - 2)..(CAVE_WIDTH / 2 + 2)) {
-                cave[y][x] = false
-            }
-        }
-        for (i in 0 until 15) {
-            val ey = 30 + random.nextInt(170)
-            val ex = random.nextInt(CAVE_WIDTH)
-            if (!cave[ey][ex]) {
-                enemies.add(Enemy(ex.toFloat(), ey.toFloat()))
-            }
         }
     }
 
-    private fun startSonarReveal() {
-        postDelayed({
-            if (!gameOver) {
-                sonarPings.add(SonarPing(playerX, playerY, SONAR_RADIUS * 0.25f, 500))
-                startSonarReveal()
-            }
-        }, 2000)
+    private fun spawnEnemyNearCharger() {
+        val chargers = collectibles.filter { it.active }
+        if (chargers.isEmpty()) return
+        val charger = chargers[random.nextInt(chargers.size)]
+        val angle = random.nextFloat() * 2f * PI.toFloat()
+        val dist = 0.06f + random.nextFloat() * 0.04f
+        val ex = (charger.normX + cos(angle) * dist).coerceIn(0.03f, 0.97f)
+        val ey = (charger.normY + sin(angle) * dist).coerceIn(0.03f, 0.97f)
+        enemies.add(LastChargeEnemy(ex, ey))
     }
 
-    private fun revealArea(cx: Float, cy: Float, radius: Float) {
-        val tileR = radius / TILE_SIZE
-        val minX = ((cx - tileR).toInt().coerceAtLeast(0))
-        val maxX = ((cx + tileR).toInt().coerceAtMost(CAVE_WIDTH - 1))
-        val minY = ((cy - tileR).toInt().coerceAtLeast(0))
-        val maxY = ((cy + tileR).toInt().coerceAtMost(199))
-        for (y in minY..maxY) {
-            for (x in minX..maxX) {
-                val dist = sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy))
-                if (dist <= tileR) {
-                    revealed[y][x] = true
-                }
-            }
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        if (oldw == 0 && oldh == 0) {
+            playerX = w / 2f
+            playerY = h / 2f
         }
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (gameOver) {
-            if (event.action == MotionEvent.ACTION_DOWN) restart()
+            if (event.action == MotionEvent.ACTION_UP && gameOverTime > 0.5f) {
+                restart()
+            }
             return true
         }
+
+        val nx = event.x / width.toFloat()
+        val ny = event.y / height.toFloat()
+
         when (event.action) {
             MotionEvent.ACTION_DOWN -> {
-                longPressActive = true
-                longPressX = event.x
-                longPressY = event.y
-                postDelayed({
-                    if (longPressActive) {
-                        sonarPings.add(SonarPing(playerX, playerY, SONAR_RADIUS, 1200))
-                        val dx = longPressX - width / 2f
-                        val dy = longPressY - height / 2f
-                        val angle = atan2(dy.toDouble(), dx.toDouble()).toFloat()
-                        sonarPings.add(SonarPing(
-                            playerX + cos(angle) * 1.5f,
-                            playerY + sin(angle) * 1.5f,
-                            BLAST_RADIUS,
-                            600
-                        ))
-                        val blast = DirectionalBlast(playerX, playerY, angle, BLAST_RADIUS)
-                        directionalBlast = blast
-                        for (enemy in enemies) {
-                            if (enemy.stunned <= 0) {
-                                val edx = enemy.x - playerX
-                                val edy = enemy.y - playerY
-                                val dist = sqrt(edx * edx + edy * edy)
-                                val enemyAngle = atan2(edy.toDouble(), edx.toDouble()).toFloat()
-                                val angleDiff = abs(((angle - enemyAngle + PI * 3) % (PI * 2) - PI).toFloat())
-                                if (dist < BLAST_RADIUS / TILE_SIZE && angleDiff < PI / 4f) {
-                                    enemy.stunned = 5000
-                                }
-                            }
+                touchStartX = event.x
+                touchStartY = event.y
+                touchActive = true
+
+                for (e in enemies) {
+                    val dx = (nx - e.normX) * width
+                    val dy = (ny - e.normY) * height
+                    val dist = sqrt(dx * dx + dy * dy)
+                    if (dist < 60f && battery >= COMBAT_DRAIN) {
+                        battery -= COMBAT_DRAIN
+                        enemiesDefeated++
+                        shakeAmount = 8f
+                        enemies.remove(e)
+                        flashTime = 0.15f
+
+                        if (battery <= 0) {
+                            battery = 0
+                            gameOver = true
+                            gameOverTime = 0f
                         }
-                    }
-                }, 600)
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                longPressActive = false
-                removeCallbacks(null)
-                if (event.eventTime - event.downTime < 400) {
-                    sonarPings.add(SonarPing(playerX, playerY, SONAR_RADIUS, 1000))
-                    for (enemy in enemies) {
-                        if (enemy.stunned <= 0) {
-                            val dx = enemy.x - playerX
-                            val dy = enemy.y - playerY
-                            val dist = sqrt(dx * dx + dy * dy)
-                            if (dist < SONAR_RADIUS / TILE_SIZE * 0.8f) {
-                                enemy.speed = minOf(enemy.speed * 1.3f, 0.05f)
-                            }
-                        }
+                        updateScore()
+                        touchActive = false
+                        break
                     }
                 }
+
+                for (c in collectibles) {
+                    val dx = (nx - c.normX) * width
+                    val dy = (ny - c.normY) * height
+                    val dist = sqrt(dx * dx + dy * dy)
+                    if (dist < 65f && !c.active) {
+                        c.active = true
+                        when (c.type) {
+                            OutletType.POWER_OUTLET -> {
+                                battery = minOf(100, battery + 30)
+                                collectibles.remove(c)
+                                collectibles.add(Collectible(OutletType.POWER_OUTLET,
+                                    random.nextFloat() * 0.8f + 0.1f, random.nextFloat() * 0.7f + 0.05f))
+                                spawnEnemyNearCharger()
+                                spawnEnemyNearCharger()
+                            }
+                            OutletType.SOLAR_PANEL -> {
+                                battery = minOf(100, battery + 5)
+                                collectibles.remove(c)
+                                collectibles.add(Collectible(OutletType.SOLAR_PANEL,
+                                    random.nextFloat() * 0.8f + 0.1f, random.nextFloat() * 0.7f + 0.05f))
+                                spawnEnemyNearCharger()
+                            }
+                            OutletType.CRANK_GENERATOR -> {
+                                battery = minOf(100, battery + 15)
+                                collectibles.remove(c)
+                                collectibles.add(Collectible(OutletType.CRANK_GENERATOR,
+                                    random.nextFloat() * 0.8f + 0.1f, random.nextFloat() * 0.7f + 0.05f))
+                                spawnEnemyNearCharger()
+                            }
+                        }
+                        flashTime = 0.2f
+                        updateScore()
+                        touchActive = false
+                        break
+                    }
+                }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (!touchActive) return true
+                val dx = event.x - touchStartX
+                val dy = event.y - touchStartY
+                val dist = sqrt(dx * dx + dy * dy)
+                if (dist > 20f) {
+                    val angle = atan2(dy.toDouble(), dx.toDouble())
+                    val moveDist = minOf(dist, 40f)
+                    val mx = (cos(angle) * moveDist).toFloat()
+                    val my = (sin(angle) * moveDist).toFloat()
+                    playerX = (playerX + mx).coerceIn(20f, width.toFloat() - 20f)
+                    playerY = (playerY + my).coerceIn(20f, height.toFloat() - 20f)
+                    touchStartX = event.x
+                    touchStartY = event.y
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastMoveDrainTime > 300 && battery > 0) {
+                        battery = maxOf(0, battery - MOVE_DRAIN)
+                        lastMoveDrainTime = now
+                        if (battery <= 0) {
+                            gameOver = true
+                            gameOverTime = 0f
+                        }
+                        updateScore()
+                    }
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                touchActive = false
             }
         }
         return true
     }
 
-    private val gameLoop = object : Runnable {
+    private fun updateScore() {
+        val timeBonus = (timeElapsed * 10).toInt()
+        score = timeBonus + enemiesDefeated * 50
+    }
+
+    val gameLoop = object : Runnable {
         override fun run() {
-            if (gameOver) return
+            if (gameOver) {
+                gameOverTime += 0.033f
+                invalidate()
+                postDelayed(this, 33)
+                return
+            }
             update()
             invalidate()
             postDelayed(this, 33)
@@ -388,180 +529,397 @@ class GameView(context: Context, private val scoreCallback: (Int) -> Unit) : Vie
     }
 
     private fun update() {
-        playerY += 0.03f
-        if (playerY.toInt() % 10 == 0 && playerY.toInt() != currentDepth) {
-            currentDepth = playerY.toInt()
-            scoreCallback(currentDepth)
-        }
-        if (playerY.toInt() in cave.indices) {
-            val px = playerX.toInt().coerceIn(0, CAVE_WIDTH - 1)
-            if (cave[playerY.toInt()][px]) {
-                gameOver = true
-            }
-        }
-        if (playerY >= 199f) {
+        timeElapsed += 0.033f
+
+        if (timeElapsed >= DAWN_DURATION) {
             gameOver = true
+            gameOverTime = 0f
+            updateScore()
+            return
         }
 
-        val iter = enemies.iterator()
-        while (iter.hasNext()) {
-            val e = iter.next()
-            if (e.stunned > 0) {
-                e.stunned -= 33
-                continue
+        if (flashTime > 0f) flashTime -= 0.033f
+        if (shakeAmount > 0f) shakeAmount = maxOf(0f, shakeAmount - 0.5f)
+
+        if (flashlightOn && battery > 0) {
+            val now = System.currentTimeMillis()
+            val elapsed = (now - lastFlashlightDrainTime) / 1000f
+            if (elapsed >= 1f && lastFlashlightDrainTime > 0) {
+                battery = maxOf(0, battery - FLASHLIGHT_DRAIN_PER_SEC.toInt())
+                lastFlashlightDrainTime = now
+                if (battery <= 0) {
+                    gameOver = true
+                    gameOverTime = 0f
+                    updateScore()
+                    return
+                }
+            } else if (lastFlashlightDrainTime == 0L) {
+                lastFlashlightDrainTime = now
             }
-            val dx = playerX - e.x
-            val dy = playerY - e.y
-            val dist = sqrt(dx * dx + dy * dy)
-            if (dist < 0.6f) {
-                gameOver = true
-                return
-            }
-            if (dist > 0.2f) {
-                e.x += (dx / dist * e.speed).toFloat()
-                e.y += (dy / dist * e.speed * 0.5f).toFloat()
-            }
-            e.x = e.x.coerceIn(0f, CAVE_WIDTH - 1f)
-            e.y = e.y.coerceIn(0f, 199f)
+            updateScore()
         }
 
-        val pingIter = sonarPings.iterator()
-        while (pingIter.hasNext()) {
-            val p = pingIter.next()
-            val maxDist = p.radius / TILE_SIZE
-            val progress = p.lerp()
-            val currentRadius = maxDist * progress
-            revealArea(p.x, p.y, currentRadius)
-            if (progress >= 1f && p.elapsed > p.duration) {
-                pingIter.remove()
-            }
-            p.elapsed += 33
-        }
-
-        directionalBlast?.let {
-            it.elapsed += 33
-            if (it.elapsed > 600) directionalBlast = null
-        }
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), bgPaint)
-
-        val viewHeight = height.toFloat()
-        val viewWidth = width.toFloat()
-        val offsetX = (viewWidth - CAVE_WIDTH * TILE_SIZE) / 2f
-        val viewCenterY = viewHeight / 2f
-        val offsetY = viewCenterY - playerY * TILE_SIZE
-
-        val yTilesVisible = (viewHeight / TILE_SIZE).toInt() + 2
-        val startY = max(0, playerY.toInt() - yTilesVisible / 2)
-        val endY = min(199, startY + yTilesVisible)
-
-        for (y in startY..endY) {
-            for (x in 0 until CAVE_WIDTH) {
-                if (revealed[y][x]) {
-                    if (cave[y][x]) {
-                        canvas.drawRect(
-                            offsetX + x * TILE_SIZE,
-                            offsetY + y * TILE_SIZE,
-                            offsetX + (x + 1) * TILE_SIZE - 1,
-                            offsetY + (y + 1) * TILE_SIZE - 1,
-                            wallRevealedPaint
-                        )
-                    }
-                } else {
-                    canvas.drawRect(
-                        offsetX + x * TILE_SIZE,
-                        offsetY + y * TILE_SIZE,
-                        offsetX + (x + 1) * TILE_SIZE - 1,
-                        offsetY + (y + 1) * TILE_SIZE - 1,
-                        bgPaint
-                    )
+        val now = System.currentTimeMillis()
+        if (now - lastChargeAttractTime > 5000) {
+            lastChargeAttractTime = now
+            val chargingCollectible = collectibles.firstOrNull { it.active }
+            if (chargingCollectible != null) {
+                if (random.nextFloat() < 0.4f) {
+                    spawnEnemyNearCharger()
                 }
             }
         }
 
+        val nx = playerX / maxOf(1f, width.toFloat())
+        val ny = playerY / maxOf(1f, height.toFloat())
+
         for (e in enemies) {
-            if (revealed[e.y.toInt().coerceIn(0, 199)][e.x.toInt().coerceIn(0, CAVE_WIDTH - 1)]) {
-                val paint = if (e.stunned > 0) enemyStunnedPaint else enemyPaint
-                canvas.drawCircle(
-                    offsetX + e.x * TILE_SIZE,
-                    offsetY + e.y * TILE_SIZE,
-                    TILE_SIZE * 0.35f,
-                    paint
-                )
+            val dx = nx - e.normX
+            val dy = ny - e.normY
+            val dist = sqrt(dx * dx + dy * dy)
+            if (dist > 0.01f) {
+                val speed = if (flashlightOn && dist < 0.3f) e.baseSpeed * 1.5f else e.baseSpeed
+                e.normX += (dx / dist * speed).coerceIn(-0.015f, 0.015f)
+                e.normY += (dy / dist * speed).coerceIn(-0.015f, 0.015f)
+            }
+            e.normX = e.normX.coerceIn(0.02f, 0.98f)
+            e.normY = e.normY.coerceIn(0.02f, 0.98f)
+
+            val ex = e.normX * width
+            val ey = e.normY * height
+            val pdx = playerX - ex
+            val pdy = playerY - ey
+            val pdist = sqrt(pdx * pdx + pdy * pdy)
+            if (pdist < 35f) {
+                gameOver = true
+                gameOverTime = 0f
+                updateScore()
+                return
             }
         }
 
-        val px = offsetX + playerX * TILE_SIZE
-        val py = offsetY + playerY * TILE_SIZE
-        canvas.drawCircle(px, py, TILE_SIZE * 0.35f, playerGlowPaint)
-        canvas.drawCircle(px, py, TILE_SIZE * 0.25f, playerPaint)
-
-        directionalBlast?.let { blast ->
-            val progress = blast.elapsed / 600f
-            val angle = blast.angle
-            val rad = blast.radius * (1f - progress)
-            val path = Path()
-            path.moveTo(px, py)
-            path.arcTo(
-                px - rad, py - rad, px + rad, py + rad,
-                Math.toDegrees((-angle + PI / 8).toDouble()).toFloat(),
-                45f * (1f - progress),
-                false
-            )
-            path.close()
-            canvas.drawPath(path, blastPaint)
+        if (enemies.size < 4 && random.nextFloat() < 0.02f) {
+            spawnEnemies(1)
         }
 
-        for (ping in sonarPings) {
-            val cx = offsetX + ping.x * TILE_SIZE
-            val cy = offsetY + ping.y * TILE_SIZE
-            val maxDist = ping.radius
-            val currentR = maxDist * ping.lerp()
-            val alpha = ((1f - ping.lerp()) * 0.4).toInt()
-            sonarPaint.alpha = (alpha * 255).toInt()
-            canvas.drawCircle(cx, cy, currentR, sonarPaint)
+        for (c in collectibles) {
+            val pnx = playerX / maxOf(1f, width.toFloat())
+            val pny = playerY / maxOf(1f, height.toFloat())
+            val dx = pnx - c.normX
+            val dy = pny - c.normY
+            val dist = sqrt(dx * dx + dy * dy)
+
+            if (c.active) {
+                when (c.type) {
+                    OutletType.POWER_OUTLET -> {
+                        if (dist < 0.08f && battery < 100) {
+                            battery = minOf(100, battery + 8)
+                            updateScore()
+                        } else if (dist > 0.1f) {
+                            c.active = false
+                        }
+                    }
+                    OutletType.SOLAR_PANEL -> {
+                        if (dist < 0.1f && battery < 100) {
+                            battery = minOf(100, battery + 2)
+                            updateScore()
+                        } else if (dist > 0.12f) {
+                            c.active = false
+                        }
+                    }
+                    OutletType.CRANK_GENERATOR -> {
+                        c.active = false
+                    }
+                }
+            }
         }
+
+        updateScore()
+        val timeLeft = maxOf(0, (DAWN_DURATION - timeElapsed).toInt())
+        hudCallback(battery, timeLeft, score, enemiesDefeated)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+
+        if (battery <= 0 && gameOver) {
+            canvas.drawRect(0f, 0f, w, h, darkPaint)
+        } else {
+            canvas.drawRect(0f, 0f, w, h, darkPaint)
+            val gridSize = 50f
+            val gridAlpha = if (battery > 30) 40 else maxOf(5, battery * 1.3f).toInt()
+            gridPaint.alpha = gridAlpha
+            var gx = 0f
+            while (gx < w) {
+                canvas.drawLine(gx, 0f, gx, h, gridPaint)
+                gx += gridSize
+            }
+            var gy = 0f
+            while (gy < h) {
+                canvas.drawLine(0f, gy, w, gy, gridPaint)
+                gy += gridSize
+            }
+        }
+
+        val shakeX = if (shakeAmount > 0f) (random.nextFloat() - 0.5f) * shakeAmount * 2f else 0f
+        val shakeY = if (shakeAmount > 0f) (random.nextFloat() - 0.5f) * shakeAmount * 2f else 0f
+
+        canvas.save()
+        canvas.translate(shakeX, shakeY)
+
+        for (c in collectibles) {
+            val cx = c.normX * w
+            val cy = c.normY * h
+            val glowPaint = when (c.type) {
+                OutletType.POWER_OUTLET -> outletGlowPaint
+                OutletType.SOLAR_PANEL -> solarGlowPaint
+                OutletType.CRANK_GENERATOR -> crankGlowPaint
+            }
+            val fillPaint = when (c.type) {
+                OutletType.POWER_OUTLET -> outletPaint
+                OutletType.SOLAR_PANEL -> solarPaint
+                OutletType.CRANK_GENERATOR -> crankPaint
+            }
+
+            val pulseScale = if (c.active) 1.0f + (sin(timeElapsed * 4f).toFloat() * 0.15f) else 1.0f
+            val glowRadius = 35f * pulseScale
+            glowPaint.alpha = if (c.active) 120 else 40
+            canvas.drawCircle(cx, cy, glowRadius, glowPaint)
+
+            val shapeRadius = 22f
+            val drawPaint = fillPaint
+            drawPaint.alpha = if (battery <= 0 && gameOver) 30 else 200
+            canvas.drawCircle(cx, cy, shapeRadius, drawPaint)
+
+            when (c.type) {
+                OutletType.POWER_OUTLET -> {
+                    val iconPaint = Paint().apply {
+                        color = 0xFF000000.toInt()
+                        style = Paint.Style.STROKE
+                        strokeWidth = 3f
+                        alpha = 100
+                    }
+                    canvas.drawLine(cx - 8, cy - 6, cx - 8, cy + 6, iconPaint)
+                    canvas.drawLine(cx - 8, cy - 6, cx - 2, cy - 6, iconPaint)
+                    canvas.drawLine(cx - 8, cy + 6, cx - 2, cy + 6, iconPaint)
+                    canvas.drawLine(cx + 2, cy - 2, cx + 8, cy + 2, iconPaint)
+                    canvas.drawLine(cx + 2, cy + 2, cx + 8, cy - 2, iconPaint)
+                }
+                OutletType.SOLAR_PANEL -> {
+                    val iconPaint = Paint().apply {
+                        color = 0xFF663300.toInt()
+                        style = Paint.Style.STROKE
+                        strokeWidth = 2f
+                        alpha = 120
+                    }
+                    canvas.drawLine(cx, cy - 12, cx, cy + 12, iconPaint)
+                    canvas.drawLine(cx - 12, cy, cx + 12, cy, iconPaint)
+                    canvas.drawLine(cx - 8, cy - 8, cx + 8, cy + 8, iconPaint)
+                    canvas.drawLine(cx + 8, cy - 8, cx - 8, cy + 8, iconPaint)
+                }
+                OutletType.CRANK_GENERATOR -> {
+                    val iconPaint = Paint().apply {
+                        color = 0xFF000022.toInt()
+                        style = Paint.Style.STROKE
+                        strokeWidth = 2f
+                        alpha = 120
+                    }
+                    canvas.drawCircle(cx, cy, 8f, iconPaint)
+                    canvas.drawCircle(cx, cy, 4f, iconPaint)
+                }
+            }
+
+            val label = when (c.type) {
+                OutletType.POWER_OUTLET -> "⚡POWER"
+                OutletType.SOLAR_PANEL -> "☀SOLAR"
+                OutletType.CRANK_GENERATOR -> "⚙CRANK"
+            }
+            collectTextPaint.alpha = if (battery <= 0 && gameOver) 30 else 180
+            canvas.drawText(label, cx, cy - 34, collectTextPaint)
+
+            if (c.active) {
+                val statusPaint = Paint().apply {
+                    color = 0xFF44FF44.toInt()
+                    textSize = 14f
+                    textAlign = Paint.Align.CENTER
+                    typeface = Typeface.MONOSPACE
+                    alpha = 200
+                }
+                canvas.drawText("CHARGING", cx, cy + 42, statusPaint)
+            }
+        }
+
+        val flashAlpha = if (flashTime > 0f) (flashTime / 0.2f * 80).toInt() else 0
+        if (flashAlpha > 0) {
+            val flashPaint = Paint().apply {
+                color = 0xFFFF2222.toInt()
+                alpha = flashAlpha
+                style = Paint.Style.FILL
+            }
+            canvas.drawRect(0f, 0f, w, h, flashPaint)
+        }
+
+        for (e in enemies) {
+            val ex = e.normX * w
+            val ey = e.normY * h
+
+            enemyGlowPaint.alpha = if (battery <= 0 && gameOver) 8 else 60
+            canvas.drawCircle(ex, ey, 28f, enemyGlowPaint)
+
+            val alpha = if (battery <= 0 && gameOver) 30 else 220
+            enemyPaint.alpha = alpha
+            canvas.drawCircle(ex, ey, 16f, enemyPaint)
+
+            val eyePaint = Paint().apply {
+                color = 0xFFFF0000.toInt()
+                style = Paint.Style.FILL
+                alpha = alpha
+            }
+            canvas.drawCircle(ex - 5, ey - 4, 4f, eyePaint)
+            canvas.drawCircle(ex + 5, ey - 4, 4f, eyePaint)
+
+            val pupilPaint = Paint().apply {
+                color = 0xFFFFFF00.toInt()
+                style = Paint.Style.FILL
+                alpha = alpha
+            }
+            val lookX = playerX - ex
+            val lookY = playerY - ey
+            val lookDist = maxOf(1f, sqrt(lookX * lookX + lookY * lookY))
+            canvas.drawCircle(ex - 5 + (lookX / lookDist) * 1.5f, ey - 4 + (lookY / lookDist) * 1.5f, 1.5f, pupilPaint)
+            canvas.drawCircle(ex + 5 + (lookX / lookDist) * 1.5f, ey - 4 + (lookY / lookDist) * 1.5f, 1.5f, pupilPaint)
+        }
+
+        if (battery <= 0 && gameOver) {
+            playerOffPaint.alpha = 40
+            canvas.drawCircle(playerX, playerY, 18f, playerOffPaint)
+        } else {
+            val glowRadius = if (flashlightOn) 60f else 35f
+            playerGlowPaint.alpha = if (battery <= 20) 60 else 100
+            canvas.drawCircle(playerX, playerY, glowRadius * (1f + sin(timeElapsed * 3f).toFloat() * 0.1f), playerGlowPaint)
+
+            playerPaint.alpha = 220
+            canvas.drawCircle(playerX, playerY, 18f, playerPaint)
+
+            val innerPaint = Paint().apply {
+                color = 0xFFFF6666.toInt()
+                style = Paint.Style.FILL
+            }
+            canvas.drawCircle(playerX, playerY, 8f, innerPaint)
+        }
+
+        if (flashlightOn && battery > 0 && !gameOver) {
+            flashlightPaint.alpha = 60
+            canvas.drawCircle(playerX, playerY, 200f, flashlightPaint)
+            flashlightPaint.alpha = 30
+            canvas.drawCircle(playerX, playerY, 350f, flashlightPaint)
+        }
+
+        canvas.restore()
+
+        val barX = 16f
+        val barY = 8f
+        val barW = w - 32f
+        val barH = 20f
+        canvas.drawRoundRect(barX - 2, barY - 2, barX + barW + 2, barY + barH + 2, 6f, 6f, batteryBarBgPaint)
+        val fillW = barW * (battery / 100f)
+        val barColor = when {
+            battery > 50 -> batteryBarPaint
+            battery > 20 -> batteryLowPaint
+            else -> Paint().apply { color = 0xFFFF0000.toInt(); style = Paint.Style.FILL }
+        }
+        canvas.drawRoundRect(barX, barY, barX + fillW, barY + barH, 4f, 4f, barColor)
+
+        val barTextPaint = Paint().apply {
+            color = 0xFFFFFFFF.toInt()
+            textSize = 14f
+            textAlign = Paint.Align.CENTER
+            typeface = Typeface.MONOSPACE
+            alpha = 180
+        }
+        canvas.drawText("$battery%", w / 2f, barY + 16f, barTextPaint)
 
         if (gameOver) {
-            val overlay = Paint().apply { color = 0xBB000000.toInt(); style = Paint.Style.FILL }
-            canvas.drawRect(0f, 0f, viewWidth, viewHeight, overlay)
-            val textPaint = Paint().apply {
-                color = 0xFFFF3344.toInt()
-                textSize = 48f
+            gameOverOverlay.alpha = minOf(180, (gameOverTime * 255f).toInt())
+            canvas.drawRect(0f, 0f, w, h, gameOverOverlay)
+
+            val reasonText = if (battery <= 0) "Battery Depleted" else "Dawn Survival Failed"
+            textPaint.alpha = minOf(255, (gameOverTime * 300f).toInt())
+            smallTextPaint.alpha = minOf(255, (gameOverTime * 300f).toInt())
+
+            canvas.drawText("GAME OVER", w / 2f, h / 2f - 40, textPaint)
+            canvas.drawText(reasonText, w / 2f, h / 2f + 10, smallTextPaint)
+
+            if (battery <= 0) {
+                val darkText = Paint().apply {
+                    color = 0xFF444444.toInt()
+                    textSize = 18f
+                    textAlign = Paint.Align.CENTER
+                    typeface = Typeface.MONOSPACE
+                    alpha = minOf(200, (gameOverTime * 200f).toInt())
+                }
+                canvas.drawText("Lights go out... Enemies overrun you", w / 2f, h / 2f + 45, darkText)
+            }
+
+            val scorePaint = Paint().apply {
+                color = 0xFFFF2222.toInt()
+                textSize = 22f
                 textAlign = Paint.Align.CENTER
                 typeface = Typeface.DEFAULT_BOLD
+                alpha = minOf(255, (gameOverTime * 300f).toInt())
             }
-            val depthText = "Game Over"
-            canvas.drawText(depthText, viewWidth / 2f, viewHeight / 2f - 24, textPaint)
-            textPaint.textSize = 28f
-            textPaint.color = 0xFFCCCCCC.toInt()
-            val restartText = "Tap to Restart"
-            canvas.drawText(restartText, viewWidth / 2f, viewHeight / 2f + 32, textPaint)
+            canvas.drawText("Score: $score  |  Defeated: $enemiesDefeated", w / 2f, h / 2f + 80, scorePaint)
+
+            val restartPaint = Paint().apply {
+                color = 0xFFCCCCCC.toInt()
+                textSize = 20f
+                textAlign = Paint.Align.CENTER
+                typeface = Typeface.DEFAULT_BOLD
+                alpha = minOf(180, (gameOverTime * 200f).toInt())
+            }
+            canvas.drawText("Tap to Restart", w / 2f, h / 2f + 130, restartPaint)
         }
     }
 
     fun restart() {
-        revealed.forEach { it.fill(false) }
-        enemies.clear()
-        generateCave()
-        playerX = CAVE_WIDTH / 2f
-        playerY = 15f
-        currentDepth = 0
+        playerX = width / 2f
+        playerY = height / 2f
+        battery = 100
+        timeElapsed = 0f
+        flashlightOn = false
+        enemiesDefeated = 0
+        score = 0
         gameOver = false
-        sonarPings.clear()
-        directionalBlast = null
-        scoreCallback(0)
+        playerMoved = false
+        lastMoveDrainTime = 0L
+        lastFlashlightDrainTime = 0L
+        lastChargeAttractTime = 0L
+        flashTime = 0f
+        shakeAmount = 0f
+        gameOverTime = 0f
+        collectibles.clear()
+        enemies.clear()
+        spawnCollectibles()
+        spawnEnemies(4)
+        updateScore()
+        hudCallback(battery, DAWN_DURATION.toInt(), score, enemiesDefeated)
         invalidate()
     }
 }
 
-data class Enemy(var x: Float, var y: Float, var speed: Float = 0.025f, var stunned: Int = 0)
+enum class OutletType { POWER_OUTLET, SOLAR_PANEL, CRANK_GENERATOR }
 
-data class SonarPing(val x: Float, val y: Float, val radius: Float, val duration: Int, var elapsed: Int = 0) {
-    fun lerp(): Float = (elapsed.toFloat() / duration).coerceIn(0f, 1f)
-}
+data class Collectible(
+    val type: OutletType,
+    val normX: Float,
+    val normY: Float,
+    var active: Boolean = false
+)
 
-data class DirectionalBlast(val x: Float, val y: Float, val angle: Float, val radius: Float, var elapsed: Int = 0)
+data class LastChargeEnemy(
+    var normX: Float,
+    var normY: Float,
+    val baseSpeed: Float = 0.004f + Math.random().toFloat() * 0.003f
+)
